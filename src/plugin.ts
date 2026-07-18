@@ -1,10 +1,33 @@
 import type { DesktopCodePlugin } from "@bitsentry/plugin-sdk";
+import { Effect } from "effect";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+const GITHUB_REQUEST_TIMEOUT_MS = 30_000;
 const GITHUB_ALLOWED_BASE_URLS_ENV = "GITHUB_ALLOWED_BASE_URLS";
 const GITHUB_BUILTIN_ALLOWED_HOSTS = new Set(["api.github.com"]);
+
+async function runGitHubRequest<T>(
+  operation: string,
+  execute: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  return Effect.runPromise(
+    Effect.tryPromise({
+      try: execute,
+      catch: (cause) =>
+        cause instanceof Error ? cause : new Error(`${operation} failed`),
+    }).pipe(
+      Effect.timeoutFail({
+        duration: GITHUB_REQUEST_TIMEOUT_MS,
+        onTimeout: () =>
+          new Error(
+            `${operation} timed out after ${String(GITHUB_REQUEST_TIMEOUT_MS)}ms`,
+          ),
+      }),
+    ),
+  );
+}
 
 function readRecord(value): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -201,11 +224,16 @@ async function requestGitHubJson(auth, pathname, params = {}, options = {}) {
     });
   }
 
-  const response = await fetch(
-    buildGitHubUrl(apiBase, pathname, params),
-    requestInit,
+  const { response, responseBody } = await runGitHubRequest(
+    "GitHub API request",
+    async (signal) => {
+      const response = await fetch(buildGitHubUrl(apiBase, pathname, params), {
+        ...requestInit,
+        signal,
+      });
+      return { response, responseBody: await response.text() };
+    },
   );
-  const responseBody = await response.text();
   if (!response.ok) {
     throw new Error(
       `GitHub API ${String(response.status)}: ${parseGitHubErrorBody(responseBody)}`,
