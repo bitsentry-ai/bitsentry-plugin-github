@@ -8,22 +8,78 @@ const GITHUB_REQUEST_TIMEOUT_MS = 30_000;
 const GITHUB_ALLOWED_BASE_URLS_ENV = "GITHUB_ALLOWED_BASE_URLS";
 const GITHUB_BUILTIN_ALLOWED_HOSTS = new Set(["api.github.com"]);
 
+type PluginOperationContext = {
+  signal?: AbortSignal;
+  deadlineAt?: number;
+};
+
+function linkAbortSignals(signals: readonly (AbortSignal | undefined)[]) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const activeSignals = signals.filter(
+    (signal): signal is AbortSignal => signal !== undefined && !signal.aborted,
+  );
+
+  if (signals.some((signal) => signal?.aborted === true)) {
+    abort();
+  } else {
+    for (const signal of activeSignals) {
+      signal.addEventListener("abort", abort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      for (const signal of activeSignals) {
+        signal.removeEventListener("abort", abort);
+      }
+    },
+  };
+}
+
+function operationTimeoutMs(operation?: PluginOperationContext): number {
+  if (typeof operation?.deadlineAt !== "number") {
+    return GITHUB_REQUEST_TIMEOUT_MS;
+  }
+
+  return Math.max(
+    0,
+    Math.min(GITHUB_REQUEST_TIMEOUT_MS, operation.deadlineAt - Date.now()),
+  );
+}
+
+function readOperationContext(context): PluginOperationContext | undefined {
+  return (context as { operation?: PluginOperationContext }).operation;
+}
+
 async function runGitHubRequest<T>(
   operation: string,
+  parentOperation: PluginOperationContext | undefined,
   execute: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
+  const timeoutMs = operationTimeoutMs(parentOperation);
+
   return Effect.runPromise(
     Effect.tryPromise({
-      try: execute,
+      try: async (effectSignal) => {
+        const linkedSignal = linkAbortSignals([
+          parentOperation?.signal,
+          effectSignal,
+        ]);
+        try {
+          return await execute(linkedSignal.signal);
+        } finally {
+          linkedSignal.dispose();
+        }
+      },
       catch: (cause) =>
         cause instanceof Error ? cause : new Error(`${operation} failed`),
     }).pipe(
       Effect.timeoutFail({
-        duration: GITHUB_REQUEST_TIMEOUT_MS,
+        duration: timeoutMs,
         onTimeout: () =>
-          new Error(
-            `${operation} timed out after ${String(GITHUB_REQUEST_TIMEOUT_MS)}ms`,
-          ),
+          new Error(`${operation} timed out after ${String(timeoutMs)}ms`),
       }),
     ),
   );
@@ -197,7 +253,13 @@ function parseGitHubErrorBody(raw) {
   return raw;
 }
 
-async function requestGitHubJson(auth, pathname, params = {}, options = {}) {
+async function requestGitHubJson(
+  auth,
+  pathname,
+  params = {},
+  options = {},
+  operation,
+) {
   const accessToken = readString(auth.accessToken);
   const apiBase = auth.apiBase ?? auth.baseUrl;
   const headers: Record<string, string> = {
@@ -226,6 +288,7 @@ async function requestGitHubJson(auth, pathname, params = {}, options = {}) {
 
   const { response, responseBody } = await runGitHubRequest(
     "GitHub API request",
+    operation,
     async (signal) => {
       const response = await fetch(buildGitHubUrl(apiBase, pathname, params), {
         ...requestInit,
@@ -253,8 +316,8 @@ async function requestGitHubJson(auth, pathname, params = {}, options = {}) {
   };
 }
 
-async function requestGitHub(auth, pathname, params = {}) {
-  const result = await requestGitHubJson(auth, pathname, params);
+async function requestGitHub(auth, pathname, params = {}, operation) {
+  const result = await requestGitHubJson(auth, pathname, params, {}, operation);
   return result.data;
 }
 
@@ -376,7 +439,7 @@ function buildIssueParams(input, requestLimit, page) {
   return params;
 }
 
-async function listIssuesForRepo(auth, owner, repo, input) {
+async function listIssuesForRepo(auth, owner, repo, input, operation) {
   const limit = boundedLimit(input.limit);
   const requestLimit = sentinelRequestLimit(limit);
   const page = readCursorPage(input.cursor);
@@ -384,6 +447,7 @@ async function listIssuesForRepo(auth, owner, repo, input) {
     auth,
     `/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/issues`,
     buildIssueParams(input, requestLimit, page),
+    operation,
   );
   const rawRecords = Array.isArray(issues) ? issues : [];
   const records = rawRecords
@@ -406,7 +470,15 @@ async function listGitHubIssues(context) {
   const pages = [];
 
   for (const repo of repos) {
-    pages.push(await listIssuesForRepo(auth, owner, repo, input));
+    pages.push(
+      await listIssuesForRepo(
+        auth,
+        owner,
+        repo,
+        input,
+        readOperationContext(context),
+      ),
+    );
   }
 
   const issues = pages.flatMap((page) => page.issues);
@@ -446,13 +518,18 @@ async function queryGitHubIssues(context) {
   let hasMore = false;
 
   for (const repo of repos) {
-    const result = await requestGitHub(auth, "/search/issues", {
-      q: buildSearchQuery(input, owner, repo),
-      sort: "updated",
-      order: "desc",
-      per_page: String(requestLimit),
-      page: String(page),
-    });
+    const result = await requestGitHub(
+      auth,
+      "/search/issues",
+      {
+        q: buildSearchQuery(input, owner, repo),
+        sort: "updated",
+        order: "desc",
+        per_page: String(requestLimit),
+        page: String(page),
+      },
+      readOperationContext(context),
+    );
     const resultItems = readRecord(result).items;
     const items: unknown[] = Array.isArray(resultItems) ? resultItems : [];
     for (const item of items.slice(0, limit)) {
@@ -519,6 +596,7 @@ async function createGitHubIssue(context) {
       method: "POST",
       body: buildCreateIssueBody(input),
     },
+    readOperationContext(context),
   );
 
   return {
@@ -530,7 +608,12 @@ async function createGitHubIssue(context) {
 
 async function listGitHubOrganizations(context) {
   const auth = readRecord(context.auth);
-  const orgs = await requestGitHub(auth, "/user/orgs", { per_page: "100" });
+  const orgs = await requestGitHub(
+    auth,
+    "/user/orgs",
+    { per_page: "100" },
+    readOperationContext(context),
+  );
   const data = Array.isArray(orgs)
     ? orgs.map((org) => {
         const record = readRecord(org);
@@ -562,6 +645,7 @@ async function listGitHubProjects(context) {
         type: "all",
         per_page: "100",
       },
+      readOperationContext(context),
     );
   } catch (error) {
     if (!isGitHubNotFoundError(error)) {
@@ -575,6 +659,7 @@ async function listGitHubProjects(context) {
         type: "all",
         per_page: "100",
       },
+      readOperationContext(context),
     );
   }
   const data = Array.isArray(repos) ? repos.map(normalizeRepository) : [];

@@ -208,6 +208,40 @@ describe("GitHub plugin package", () => {
     });
   });
 
+  it("aborts an in-flight API request when the parent operation is cancelled", async () => {
+    vi.stubEnv("GITHUB_ALLOWED_BASE_URLS", "github.example.com");
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(
+      (_url: string, request?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestSignal = request?.signal ?? undefined;
+          requestSignal?.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            {
+              once: true,
+            },
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = action("list_issues").execute({
+      ...context("list_issues", {
+        owner: "bitsentry-ai",
+        repo: "monorepo",
+      }),
+      operation: { signal: controller.signal },
+    } as DesktopPluginCodeActionContext);
+
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+    controller.abort();
+
+    await expect(result).rejects.toThrow("aborted");
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("rejects non-HTTPS GitHub API bases before sending bearer credentials", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
