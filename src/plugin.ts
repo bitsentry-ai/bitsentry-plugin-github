@@ -468,10 +468,13 @@ async function listIssuesForRepo(auth, owner, repo, input, operation) {
     page += 1;
   }
 
+  const hasOverflow = records.length > limit;
+  const canContinue = hasMore || hasOverflow;
+
   return {
     issues: records.slice(0, limit),
-    hasMore,
-    nextCursor: hasMore ? String(page + 1) : undefined,
+    hasMore: canContinue,
+    nextCursor: canContinue ? String(page + 1) : undefined,
   };
 }
 

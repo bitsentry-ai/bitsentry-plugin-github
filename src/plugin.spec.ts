@@ -283,6 +283,94 @@ describe("GitHub plugin package", () => {
     ).toBe("2");
   });
 
+  it("keeps pagination open when a short final page overfills the limit", async () => {
+    vi.stubEnv("GITHUB_ALLOWED_BASE_URLS", "github.example.com");
+    const fetchMock =
+      vi.fn<(url: string, request?: RequestInit) => Promise<Response>>();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            createGitHubIssue({ id: 400, number: 60, title: "First issue" }),
+            ...Array.from({ length: 5 }, (_, index) =>
+              createGitHubIssue({
+                id: 401 + index,
+                number: 61 + index,
+                title: `Review PR ${String(index + 1)}`,
+                html_url: `https://github.example.com/bitsentry-ai/monorepo/pull/${String(61 + index)}`,
+                pull_request: {
+                  url: `https://api.github.com/repos/bitsentry-ai/monorepo/pulls/${String(61 + index)}`,
+                },
+              }),
+            ),
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            createGitHubIssue({ id: 406, number: 66, title: "Second issue" }),
+            createGitHubIssue({ id: 407, number: 67, title: "Third issue" }),
+            ...Array.from({ length: 4 }, (_, index) =>
+              createGitHubIssue({
+                id: 408 + index,
+                number: 68 + index,
+                title: `Review PR ${String(index + 6)}`,
+                html_url: `https://github.example.com/bitsentry-ai/monorepo/pull/${String(68 + index)}`,
+                pull_request: {
+                  url: `https://api.github.com/repos/bitsentry-ai/monorepo/pulls/${String(68 + index)}`,
+                },
+              }),
+            ),
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            createGitHubIssue({ id: 412, number: 72, title: "Fourth issue" }),
+            createGitHubIssue({ id: 413, number: 73, title: "Fifth issue" }),
+            createGitHubIssue({ id: 414, number: 74, title: "Sixth issue" }),
+            createGitHubIssue({ id: 415, number: 75, title: "Seventh issue" }),
+          ]),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await action("list_issues").execute(
+      context("list_issues", {
+        owner: "bitsentry-ai",
+        repo: "monorepo",
+        limit: 5,
+      }),
+    );
+
+    expect(result.data).toMatchObject({
+      issues: [
+        { externalIssueId: "bitsentry-ai/monorepo#60" },
+        { externalIssueId: "bitsentry-ai/monorepo#66" },
+        { externalIssueId: "bitsentry-ai/monorepo#67" },
+        { externalIssueId: "bitsentry-ai/monorepo#72" },
+        { externalIssueId: "bitsentry-ai/monorepo#73" },
+      ],
+      hasMore: true,
+      nextCursor: "4",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("aborts an in-flight API request when the parent operation is cancelled", async () => {
     vi.stubEnv("GITHUB_ALLOWED_BASE_URLS", "github.example.com");
     const controller = new AbortController();
