@@ -444,18 +444,29 @@ function buildIssueParams(input, requestLimit, page) {
 async function listIssuesForRepo(auth, owner, repo, input, operation) {
   const limit = boundedLimit(input.limit);
   const requestLimit = sentinelRequestLimit(limit);
-  const page = readCursorPage(input.cursor);
-  const issues = await requestGitHub(
-    auth,
-    `/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/issues`,
-    buildIssueParams(input, requestLimit, page),
-    operation,
-  );
-  const rawRecords = Array.isArray(issues) ? issues : [];
-  const records = rawRecords
-    .filter((issue) => !isGitHubPullRequestIssue(issue))
-    .map((issue) => normalizeGitHubIssue(owner, repo, issue));
-  const hasMore = pageHasMore(rawRecords, limit, requestLimit);
+  let page = readCursorPage(input.cursor);
+  const records = [];
+  let hasMore = false;
+
+  while (records.length < limit) {
+    const issues = await requestGitHub(
+      auth,
+      `/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/issues`,
+      buildIssueParams(input, requestLimit, page),
+      operation,
+    );
+    const rawRecords = Array.isArray(issues) ? issues : [];
+    records.push(
+      ...rawRecords
+        .filter((issue) => !isGitHubPullRequestIssue(issue))
+        .map((issue) => normalizeGitHubIssue(owner, repo, issue)),
+    );
+    hasMore = pageHasMore(rawRecords, limit, requestLimit);
+    if (!hasMore || records.length >= limit) {
+      break;
+    }
+    page += 1;
+  }
 
   return {
     issues: records.slice(0, limit),
