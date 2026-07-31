@@ -218,7 +218,7 @@ describe("GitHub plugin package", () => {
           requestSignal = request?.signal ?? undefined;
           requestSignal?.addEventListener(
             "abort",
-            () => reject(new Error("aborted")),
+            () => { reject(new Error("aborted")); },
             {
               once: true,
             },
@@ -235,7 +235,7 @@ describe("GitHub plugin package", () => {
       operation: { signal: controller.signal },
     } as DesktopPluginCodeActionContext);
 
-    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+    await vi.waitFor(() => { expect(requestSignal).toBeDefined(); });
     controller.abort();
 
     await expect(result).rejects.toThrow("aborted");
