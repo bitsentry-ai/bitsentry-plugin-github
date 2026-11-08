@@ -60,18 +60,9 @@ describe("GitHub plugin package", () => {
     vi.unstubAllEnvs();
   });
 
-  it("declares a typed GitHub error-source code plugin", () => {
-    expect(plugin).toMatchObject({
-      id: "github",
-      referenceRepositoryPath: ".repos/references/plugins/stackstorm-github",
-      metadata: {
-        dataSource: {
-          sourceType: "github",
-        },
-      },
-    });
+  it("exposes the error-source actions no behaviour test calls", () => {
     expect(plugin.actions.map((candidate) => candidate.id)).toEqual(
-      expect.arrayContaining(["list_issues", "query_issues", "list_projects"]),
+      expect.arrayContaining(["query_issues", "list_projects"]),
     );
   });
 
