@@ -22,7 +22,7 @@ function linkAbortSignals(signals: readonly (AbortSignal | undefined)[]) {
     (signal): signal is AbortSignal => signal !== undefined && !signal.aborted,
   );
 
-  if (signals.some((signal) => signal?.aborted === true)) {
+  if (signals.some((signal) => signal?.aborted)) {
     abort();
   } else {
     for (const signal of activeSignals) {
@@ -255,13 +255,7 @@ function parseGitHubErrorBody(raw) {
   return raw;
 }
 
-async function requestGitHubJson(
-  auth,
-  pathname,
-  params = {},
-  options = {},
-  operation,
-) {
+async function requestGitHubJson(auth, pathname, params, options, operation) {
   const accessToken = readString(auth.accessToken);
   const apiBase = auth.apiBase ?? auth.baseUrl;
   const headers: Record<string, string> = {
@@ -318,7 +312,7 @@ async function requestGitHubJson(
   };
 }
 
-async function requestGitHub(auth, pathname, params = {}, operation) {
+async function requestGitHub(auth, pathname, params, operation) {
   const result = await requestGitHubJson(auth, pathname, params, {}, operation);
   return result.data;
 }
